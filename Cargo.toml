@@ -7,5 +7,6 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+serde = { version = "1.0.115", features = ["derive"] }
 clap = "2.33.3"
-directories = "3.0.1"
+confy = "0.4.0"
