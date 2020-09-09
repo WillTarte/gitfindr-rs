@@ -20,7 +20,6 @@ impl Display for NotARepositoryError {
 
 impl Error for NotARepositoryError {}
 
-
 #[derive(Debug)]
 pub struct RepoAlreadyExistsError;
 
@@ -31,7 +30,6 @@ impl Display for RepoAlreadyExistsError {
 }
 
 impl Error for RepoAlreadyExistsError {}
-
 
 #[derive(Debug)]
 pub struct RepoDoesNotExistError;

@@ -40,7 +40,7 @@ impl RepoData {
     fn new(name: &str, path: &str) -> GFResult<Self> {
         let mut repo_data = RepoData::default();
         repo_data.name = name.to_string();
-        repo_data.path = match RepoData::validate_repo(path) {
+        repo_data.path = match validate_repo(path) {
             Ok(_) => match PathBuf::from_str(path) {
                 Ok(buf) => buf,
                 Err(err) => return Result::Err(Box::new(err)),
@@ -48,37 +48,6 @@ impl RepoData {
             Err(err) => return Result::Err(err),
         };
         Ok(repo_data)
-    }
-
-    /// Validates that the given string slice is a valid path that points to a repository.
-    ///
-    /// # Arguments
-    /// * `path_str` - A string slice representing the absolute path to a repository
-    ///
-    /// # Returns
-    /// A result object with an empty Ok variant on success, or an Err variant with a Box\<dyn Error\> on failure.
-    fn validate_repo(path_str: &str) -> self::GFResult<()> {
-        let path_buf: PathBuf = match PathBuf::from_str(path_str) {
-            Ok(buf) => buf,
-            Err(err) => return Result::Err(Box::new(err)),
-        };
-
-        match fs::read_dir(path_buf) {
-            Ok(dir_it) => {
-                for entry_res in dir_it {
-                    match entry_res {
-                        Ok(entry) => {
-                            if entry.file_name().eq(GIT_FILE) {
-                                return Result::Ok(());
-                            }
-                        }
-                        Err(err) => return Result::Err(Box::new(err)),
-                    }
-                }
-            }
-            Err(err) => return Result::Err(Box::new(err)),
-        }
-        Result::Err(Box::new(NotARepositoryError))
     }
 }
 
@@ -115,7 +84,7 @@ impl GitFindrConfig {
     }
 
     fn remove_repo(&mut self, name: &str) -> GFResult<()> {
-        return if !self.repos.contains_key(&repo.name) {
+        return if !self.repos.contains_key(name) {
             Err(Box::new(RepoDoesNotExistError))
         } else {
             self.repos.remove(name);
@@ -134,6 +103,72 @@ impl Default for GitFindrConfig {
             repos: HashMap::new(),
         }
     }
+}
+
+/// Validates that the given string slice is a valid path that points to a repository.
+///
+/// # Arguments
+/// * `path_str` - A string slice representing the absolute path to a repository
+///
+/// # Returns
+/// A result object with an empty Ok variant on success, or an Err variant with a Box\<dyn Error\> on failure.
+fn validate_repo(path_str: &str) -> self::GFResult<()> {
+    let path_buf: PathBuf = match PathBuf::from_str(path_str) {
+        Ok(buf) => buf,
+        Err(err) => return Result::Err(Box::new(err)),
+    };
+
+    match fs::read_dir(path_buf) {
+        Ok(dir_it) => {
+            for entry_res in dir_it {
+                match entry_res {
+                    Ok(entry) => {
+                        if entry.file_name().eq(GIT_FILE) {
+                            return Result::Ok(());
+                        }
+                    }
+                    Err(err) => return Result::Err(Box::new(err)),
+                }
+            }
+        }
+        Err(err) => return Result::Err(Box::new(err)),
+    }
+    Result::Err(Box::new(NotARepositoryError))
+}
+
+//TODO does rayon have parallel iterators for directories?
+fn parse_directory(dir_path: &str) -> self::GFResult<Vec<RepoData>> {
+    match fs::read_dir(dir_path) {
+        Ok(read_dir) => {
+            let res: Result<Vec<RepoData>, Box<dyn Error>> = read_dir
+                .into_iter()
+                .map(|dir_entry_res| {
+                    let res: Result<RepoData, Box<dyn Error>> = return match dir_entry_res {
+                        Ok(dir_entry) => {
+                            if dir_entry.file_name().eq(GIT_FILE) {
+                                RepoData::new("name", dir_entry.path().to_str().unwrap())
+                            } else {
+                                match dir_entry.metadata() {
+                                    Ok(meta) => {
+                                        if meta.is_dir() {
+                                            todo!();
+                                            fs::read_dir(dir_entry.path())
+                                        }
+
+                                        RepoData::new("", "")
+                                    }
+                                    Err(err) => Err(Box::from(err)),
+                                }
+                            }
+                        }
+                        Err(err) => Err(Box::from(err)),
+                    };
+                })
+                .collect();
+        }
+        Err(err) => eprintln!("{:?}", err),
+    }
+    Ok(vec![])
 }
 
 fn main() {
@@ -214,9 +249,7 @@ fn main() {
 
     match matches.subcommand() {
         ("add", Some(args)) => {
-            if args.is_present("-d") {
-                todo!("check directory for repos");
-            }
+            if args.is_present("-d") {}
 
             match (args.value_of("alias"), args.value_of("path")) {
                 (Some(alias), Some(path)) => match RepoData::new(alias, path) {
@@ -231,14 +264,12 @@ fn main() {
             }
         }
 
-        ("remove", Some(args)) => {
-            match args.value_of("name") {
-                Some(name) => {
-                    config.remove_repo(name);
-                }
-                None => eprintln!("User did give a repo to remove."),
+        ("remove", Some(args)) => match args.value_of("name") {
+            Some(name) => {
+                config.remove_repo(name);
             }
-        }
+            None => eprintln!("User did give a repo to remove."),
+        },
 
         ("list", Some(args)) => {
             if args.is_present("-v") || args.is_present("verbose") {
