@@ -1,15 +1,13 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use clap::{App, Arg, SubCommand};
 use serde::{Deserialize, Serialize};
 
-use err::{NotARepositoryError, RepoAlreadyExistsError};
-
-use crate::err::RepoDoesNotExistError;
+use crate::err::{NotARepositoryError, RepoAlreadyExistsError, RepoDoesNotExistError, RepoNameExtractError};
 
 mod err;
 
@@ -37,16 +35,40 @@ impl RepoData {
     ///
     ///  # Returns
     /// A result object with the RepoData on success, or an Err variant with a Box\<dyn Error\> on failure.
-    fn new(name: &str, path: &str) -> GFResult<Self> {
+    fn new<P: Into<PathBuf>>(name: &str, path: P) -> Self {
+        RepoData {
+            name: name.to_string(),
+            path: path.into(),
+        }
+    }
+
+    /// Creates new data object from a repo - inferring the name from the folder or a remote
+    ///
+    /// # Arguments
+    /// * `path` - A string slice representing the absolute path to a repo's directory
+    ///
+    /// # Returns
+    /// A result object with the RepoData on success, or an Err variant with a Box\<dyn Error\> on failure.
+    #[allow(dead_code)]
+    fn from_path(path: &str) -> GFResult<Self> {
         let mut repo_data = RepoData::default();
-        repo_data.name = name.to_string();
-        repo_data.path = match validate_repo(path) {
-            Ok(_) => match PathBuf::from_str(path) {
-                Ok(buf) => buf,
-                Err(err) => return Result::Err(Box::new(err)),
+
+        match validate_repo(path) {
+            Ok(_) => {
+                match PathBuf::from_str(path) {
+                    Ok(path_buf) => {
+                        repo_data.path = path_buf;
+                        match repo_data.path.file_name() {
+                            Some(filename) => { repo_data.name = filename.to_str().unwrap().to_owned() },
+                            None => {}
+                        }
+                    },
+                    Err(err) => return Err(Box::new(err))
+                }
             },
-            Err(err) => return Result::Err(err),
-        };
+            Err(err) => return Err(err)
+        }
+
         Ok(repo_data)
     }
 }
@@ -78,6 +100,7 @@ impl GitFindrConfig {
         return if self.repos.contains_key(&repo.name) {
             Err(Box::new(RepoAlreadyExistsError))
         } else {
+            println!("Added {} to list of repositories", &repo.name);
             self.repos.insert(repo.name.clone(), repo);
             Ok(())
         };
@@ -112,13 +135,8 @@ impl Default for GitFindrConfig {
 ///
 /// # Returns
 /// A result object with an empty Ok variant on success, or an Err variant with a Box\<dyn Error\> on failure.
-fn validate_repo(path_str: &str) -> self::GFResult<()> {
-    let path_buf: PathBuf = match PathBuf::from_str(path_str) {
-        Ok(buf) => buf,
-        Err(err) => return Result::Err(Box::new(err)),
-    };
-
-    match fs::read_dir(path_buf) {
+fn validate_repo<P: AsRef<Path>>(path: P) -> self::GFResult<()> {
+    match fs::read_dir(path) {
         Ok(dir_it) => {
             for entry_res in dir_it {
                 match entry_res {
@@ -137,38 +155,44 @@ fn validate_repo(path_str: &str) -> self::GFResult<()> {
 }
 
 //TODO does rayon have parallel iterators for directories?
-fn parse_directory(dir_path: &str) -> self::GFResult<Vec<RepoData>> {
-    match fs::read_dir(dir_path) {
-        Ok(read_dir) => {
-            let res: Result<Vec<RepoData>, Box<dyn Error>> = read_dir
-                .into_iter()
-                .map(|dir_entry_res| {
-                    let res: Result<RepoData, Box<dyn Error>> = return match dir_entry_res {
-                        Ok(dir_entry) => {
-                            if dir_entry.file_name().eq(GIT_FILE) {
-                                RepoData::new("name", dir_entry.path().to_str().unwrap())
-                            } else {
-                                match dir_entry.metadata() {
-                                    Ok(meta) => {
-                                        if meta.is_dir() {
-                                            todo!();
-                                            fs::read_dir(dir_entry.path())
-                                        }
+fn parse_directory<P: Into<PathBuf>>(dir_path: P) -> self::GFResult<Vec<RepoData>> {
+    let mut repos: Vec<RepoData> = Vec::new();
+    let mut dir_paths: Vec<PathBuf> = Vec::new();
 
-                                        RepoData::new("", "")
-                                    }
-                                    Err(err) => Err(Box::from(err)),
-                                }
-                            }
+    dir_paths.push(dir_path.into());
+    while let Some(dir) = dir_paths.pop() {
+
+        // Add directories inside this directory to list to scan
+        match dir.read_dir() {
+            Ok(mut dir_it) => {
+                while let Some(Ok(dir_entry)) = dir_it.next() {
+                    if let Ok(metadata) = dir_entry.metadata() {
+                        if metadata.is_dir() {
+                            dir_paths.push(dir_entry.path());
                         }
-                        Err(err) => Err(Box::from(err)),
-                    };
-                })
-                .collect();
+                    }
+                }
+            },
+            Err(err) => eprintln!("{}", err)
         }
-        Err(err) => eprintln!("{:?}", err),
+
+        // create RepoData if this directory is a repo
+        match validate_repo(&dir) {
+            Ok(_) => {
+                if let Some(os_str) = dir.file_stem() {
+                    if let Some(name) = os_str.to_str() {
+                        repos.push(RepoData::new(name, dir.clone()))
+                    } else {
+                        eprintln!("{}", RepoNameExtractError);
+                    }
+                } else {
+                    eprintln!("{}", RepoNameExtractError);
+                }
+            }
+            Err(_err) => {}//eprintln!("{}", err)
+        }
     }
-    Ok(vec![])
+    Ok(repos)
 }
 
 fn main() {
@@ -187,7 +211,7 @@ fn main() {
                         .long("path")
                         .allow_hyphen_values(true)
                         .takes_value(true)
-                        .required(true),
+                        .required(false),
                 )
                 .arg(
                     Arg::with_name("alias")
@@ -195,12 +219,12 @@ fn main() {
                         .long("alias")
                         .allow_hyphen_values(true)
                         .takes_value(true)
-                        .required(true),
+                        .required(false),
                 )
                 .arg(
-                    Arg::with_name("-d")
+                    Arg::with_name("-d").short("-d")
                         .allow_hyphen_values(true)
-                        .takes_value(false),
+                        .takes_value(true),
                 )
                 .help("When you add a directory possible containing multiple repositories."),
         )
@@ -249,24 +273,42 @@ fn main() {
 
     match matches.subcommand() {
         ("add", Some(args)) => {
-            if args.is_present("-d") {}
-
-            match (args.value_of("alias"), args.value_of("path")) {
-                (Some(alias), Some(path)) => match RepoData::new(alias, path) {
-                    Ok(repo) => match config.add_repo(repo) {
-                        Ok(_) => {}
-                        Err(err) => eprintln!("{}", err),
+            if args.is_present("-d") {
+                match args.value_of("-d") {
+                    Some(dir_str) => {
+                        match parse_directory(dir_str) {
+                            Ok(repos) => {
+                                for repo in repos {
+                                    match config.add_repo(repo) {
+                                        _ => {}
+                                    }
+                                }
+                            },
+                            Err(err) => eprintln!("{}", err)
+                        }
                     },
-                    Err(err) => eprintln!("{}", err),
-                },
-                (_, None) => eprintln!("User tried to add a repo with no path"),
-                (None, _) => eprintln!("User tried to add a repo with no name"),
+                    None => eprintln!("User tried to scan a dir for repos, but not dir was given."),
+                }
+            } else {
+                match (args.value_of("alias"), args.value_of("path")) {
+                    (Some(alias), Some(path)) => match validate_repo(path) {
+                        Ok(_) => match config.add_repo(RepoData::new(alias, path)) {
+                            Ok(_) => {},
+                            Err(err) => eprintln!("{}", err)
+                        },
+                        Err(err) => eprintln!("{}", err)
+                    },
+                    (_, None) => eprintln!("User tried to add a repo with no path."),
+                    (None, _) => eprintln!("User tried to add a repo with no name."),
+                }
             }
         }
 
         ("remove", Some(args)) => match args.value_of("name") {
             Some(name) => {
-                config.remove_repo(name);
+                match config.remove_repo(name) {
+                    _ => {}
+                }
             }
             None => eprintln!("User did give a repo to remove."),
         },
